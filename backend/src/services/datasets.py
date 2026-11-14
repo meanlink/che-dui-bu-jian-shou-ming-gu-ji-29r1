@@ -4,10 +4,12 @@ from src.models import Dataset
 from src.services.business import metadata
 from src.utils.serialization import checksum
 import math, time
-def create(db, data):
+
+
+def create(db, data, fleet_id):
     name=data.name.strip()
     if len(name)<2: raise HTTPException(422, '批次名称去除空格后至少需要两个字符')
-    if db.scalar(select(Dataset).where(Dataset.name==name)):
+    if db.scalar(select(Dataset).where(Dataset.fleet_id==fleet_id, Dataset.name==name)):
         raise HTTPException(409, '该数据批次名已存在，请修改名称')
     for index,row in enumerate(data.records):
         for c in metadata()['columns']:
@@ -18,6 +20,13 @@ def create(db, data):
                     if isinstance(value,bool) or not math.isfinite(float(value)): raise ValueError()
                     row[c['key']]=float(value)
                 except (TypeError, ValueError, OverflowError): raise HTTPException(422, f'第 {index+1} 行 {c["label"]} 必须为有限数值')
-    d=Dataset(name=name, source=data.source, records=data.records, checksum=checksum(data.records), created_at=time.time())
+    d=Dataset(fleet_id=fleet_id, name=name, source=data.source, records=data.records, checksum=checksum(data.records), created_at=time.time())
     db.add(d); db.flush()
+    return d
+
+
+def visible(db, dataset_id, fleet_id):
+    """Fleet-scoped lookup. Another fleet's id is indistinguishable from missing."""
+    d=db.get(Dataset,dataset_id)
+    if not d or d.fleet_id!=fleet_id: raise HTTPException(404,'数据批次不存在')
     return d

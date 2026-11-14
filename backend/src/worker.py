@@ -16,30 +16,35 @@ def execute(job_id):
         j.status='running'; db.commit()
         try:
             d=db.get(Dataset,j.dataset_id)
+            if not d or d.fleet_id!=j.fleet_id or d.fleet_id is None:
+                raise ValueError('数据批次不属于该车队，禁止跨队计算')
             result=analyze(d.records,j.params)
             json.dumps(result,allow_nan=False)
             j.result=result;j.status='completed';j.finished_at=time.time()
-            record(db,'worker','job.completed',{'id':j.id})
+            record(db,'worker','job.completed',{'id':j.id},fleet_id=j.fleet_id)
         except Exception as e:
             logging.exception('Analysis failed')
             j.status='failed';j.error=str(e)[:990];j.finished_at=time.time()
-            record(db,'worker','job.failed',{'id':j.id,'error':j.error})
+            record(db,'worker','job.failed',{'id':j.id,'error':j.error},fleet_id=j.fleet_id)
         db.commit()
 def tick():
     with Session() as db:
         queued=list(db.scalars(select(Job.id).where(Job.status=='queued').limit(3)))
     for job_id in queued:execute(job_id)
     with Session() as db:
-        for r in db.scalars(select(Report).where(Report.enabled==True,Report.next_run<=time.time())):
+        for r in db.scalars(select(Report).where(
+                Report.enabled==True,Report.next_run<=time.time(),Report.fleet_id.is_not(None)).order_by(Report.id)):
+            # Unclaimed (sealed) chains have no fleet and never deliver. Revoking
+            # a member disables their reports, so they also stop here.
             d=deliver(db,r)
-            if d:record(db,'worker','report.delivered',{'id':r.id,'delivery':d.id})
+            if d:record(db,'worker','report.delivered',{'id':r.id,'delivery':d.id},fleet_id=r.fleet_id)
         db.commit()
 def main():
     r=Redis.from_url(REDIS_URL,socket_timeout=3)
     # This Compose stack has a single worker. A crash must not strand its jobs.
     with Session() as db:
         for j in db.scalars(select(Job).where(Job.status=='running')):
-            j.status='queued';record(db,'worker','job.recovered',{'id':j.id})
+            j.status='queued';record(db,'worker','job.recovered',{'id':j.id},fleet_id=j.fleet_id)
         db.commit()
     while True:
         Path('/tmp/heartbeat').touch()
